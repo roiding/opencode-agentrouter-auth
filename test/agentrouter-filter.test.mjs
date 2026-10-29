@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import entry from "../index.mjs";
 
 const decoder = new TextDecoder();
@@ -89,6 +90,7 @@ test("combined loader keeps account/header/session auth and filters only the mod
     assert.equal(call.body.model, history.model);
     assert.equal(call.init.headers.get("authorization"), `Bearer ${auth.key}`);
     assert.equal(call.init.headers.get("user-agent"), "codex_cli_rs/0.101.0");
+    assert.equal(call.init.headers.get("originator"), "codex_cli_rs");
     assert.equal(call.init.headers.get("x-account"), "custom");
     assert.equal(call.init.headers.get("x-request"), "kept");
     assert.equal(call.init.headers.get("x-extra"), "also-kept");
@@ -102,16 +104,26 @@ test("model discovery still uses upstream catalog and never applies response-his
   const calls = [];
   await mockedFetch(async (url, init) => {
     calls.push({ url, init });
+    if (url.endsWith("/api/pricing")) return json({ success: true, data: [
+      { model_name: "account-model-a", limit: { input: 115000, output: 8000 }, tool_call: false,
+        reasoning_options: [{ type: "effort", values: ["low", "high"] }] },
+      { model_name: "public-only", limit: { context: 999999 } }
+    ] });
     return json({ data: [{ id: "account-model-a", context_length: 123456, supported_endpoint_types: ["openai"] }, { id: "account-model-b", supported_endpoint_types: ["anthropic"] }] });
   }, async () => {
-    const hooks = await entry.server();
+    const hooks = await entry.server({}, { modelsRegistryPath: fileURLToPath(new URL("./fixtures/models.json", import.meta.url)) });
     const models = await hooks.provider.models({ models: {} }, { auth });
     assert.deepEqual(Object.keys(models), ["account-model-a", "account-model-b"]);
     assert.equal(models["account-model-a"].limit.context, 123456);
+    assert.equal(models["account-model-a"].limit.input, 115000);
+    assert.deepEqual(Object.keys(models["account-model-a"].variants), ["low", "high"]);
+    assert.equal(models["account-model-a"].capabilities.toolcall, false);
   });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].url, "https://relay.example/v1/models");
   assert.equal(calls[0].init.headers.get("authorization"), `Bearer ${auth.key}`);
+  assert.equal(calls[1].url, "https://agentrouter.org/api/pricing");
+  for (const name of ["authorization", "cookie", "new-api-user"]) assert.equal(calls[1].init.headers.get(name), null);
 });
 
 test("opted-in check-in is a site login, returns daily outcomes and never filters or retries", async t => {

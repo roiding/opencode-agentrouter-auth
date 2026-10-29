@@ -52,6 +52,126 @@ test("ordinary retries preserve exact request bytes and its chosen model", async
   assert.equal(h.logs.filter(row => row.event === "history-cleanup").length, 0);
 });
 
+test("explicit HTTP transport failures retry on gateway statuses without cleaning history", async t => {
+  for (const status of [408, 500, 502, 503, 504]) await t.test(String(status), async () => {
+    const h = harness([() => json({ error: { code: "upstream_idle_timeout", message: "idle timeout waiting for SSE" } }, status), () => sse(completed)]);
+    assert.match(await (await h.send()).text(), /new-good-history/);
+    assert.equal(h.calls.length, 2);
+    assert.deepEqual(h.calls.map(call => call.body), [history, history]);
+    assert.equal(h.logs.find(row => row.event === "http-error").kind, "transport");
+  });
+  for (const status of [400, 401, 403, 429]) await t.test(`no retry ${status}`, async () => {
+    const h = harness([() => json({ error: { code: "upstream_idle_timeout", message: "idle timeout waiting for SSE" } }, status)]);
+    assert.equal((await h.send()).status, status);
+    assert.equal(h.calls.length, 1);
+  });
+});
+
+test("buffered SSE returns headers and real non-content events while upstream is still working", { timeout: 3000 }, async t => {
+  let upstream, beat;
+  t.after(() => clearInterval(beat));
+  const h = harness([() => new Response(new ReadableStream({ start(controller) {
+    upstream = controller;
+    controller.enqueue(encoder.encode(frame("response.output_item.added", { item: { id: "winning-tool", type: "function_call", arguments: "{}" } })));
+    beat = setInterval(() => controller.enqueue(encoder.encode(": upstream is alive\n\n")), 20);
+  } }), { headers: { "content-type": "text/event-stream" } })], { keepaliveMs: 10, idleTimeoutMs: 500 });
+  const response = await h.send();
+  assert.equal(h.logs.some(row => row.event === "request-finished"), false);
+  const reader = response.body.getReader();
+  t.after(() => reader.cancel().catch(() => {}));
+  for (let i = 0; i < 3; i++) {
+    const chunk = decoder.decode((await reader.read()).value);
+    assert.match(chunk, /data:.*response.in_progress/);
+    assert.doesNotMatch(chunk, /winning-tool|function_call|response.created/);
+  }
+  clearInterval(beat);
+  upstream.enqueue(encoder.encode(completed));
+  upstream.close();
+  let text = "";
+  while (true) { const part = await reader.read(); if (part.done) break; text += decoder.decode(part.value); }
+  assert.match(text, /winning-tool/);
+  assert.match(text, /new-good-history/);
+  assert.equal(h.calls.length, 1);
+});
+
+test("keepalive spans retry backoff but never releases failed attempt IDs, text or tools", { timeout: 3000 }, async () => {
+  const h = harness([
+    async () => { await delay(30); return sse(frame("response.created", { response: { id: "failed-attempt-id" } }) +
+      frame("response.output_item.done", { item: { type: "function_call", arguments: "unsafe-tool-text" } }) + frame("response.failed", { response: { error: encrypted } })); },
+    async () => { await delay(30); return sse(frame("response.created", { response: { id: "original-winning-id" } }) + completed); }
+  ], { keepaliveMs: 5, retryDelay: () => 30 });
+  const response = await h.send();
+  const text = await response.text();
+  assert.ok((text.match(/response.in_progress/g) || []).length >= 4);
+  assert.doesNotMatch(text, /failed-attempt-id|unsafe-tool-text|invalid_encrypted_content/);
+  assert.match(text, /original-winning-id/);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.logs.filter(row => row.event === "history-cleanup").length, 1);
+});
+
+test("downstream cancellation after keepalive aborts upstream and prevents background retries", { timeout: 3000 }, async () => {
+  const h = harness([() => new Promise(() => {})], { keepaliveMs: 5, idleTimeoutMs: 1000 });
+  const response = await h.send();
+  const reader = response.body.getReader();
+  assert.match(decoder.decode((await reader.read()).value), /response.in_progress/);
+  await reader.cancel();
+  await delay(25);
+  assert.equal(h.calls[0].init.signal.aborted, true);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.logs.filter(row => row.event === "retry-scheduled").length, 0);
+  assert.equal(h.logs.find(row => row.event === "request-finished").outcome, "canceled");
+});
+
+test("downstream keepalive does not reset the independent upstream idle timeout", { timeout: 3000 }, async () => {
+  const h = harness([() => new Promise(() => {}), () => sse(completed)], { keepaliveMs: 5, idleTimeoutMs: 35 });
+  const text = await (await h.send()).text();
+  assert.match(text, /response.in_progress/);
+  assert.match(text, /new-good-history/);
+  assert.equal(h.calls.length, 2);
+  assert.equal(h.logs.find(row => row.event === "transport-error").code, "upstream_idle_timeout");
+});
+
+test("a deadline after SSE commitment is an in-band failure, never JSON or fake completion", { timeout: 3000 }, async () => {
+  const h = harness([() => new Promise(() => {})], { keepaliveMs: 5, deadlineMs: 65, idleTimeoutMs: 1000 });
+  const response = await h.send();
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  assert.match(text, /response.failed/);
+  assert.match(text, /request_deadline/);
+  assert.doesNotMatch(text, /response.completed/);
+  assert.equal(h.calls.length, 1);
+});
+
+test("late HTTP failures preserve error code, original status and routing hints inside SSE", async () => {
+  const h = harness([async () => { await delay(30); return json({ error: { code: "invalid_api_key", message: "fixture rejection" } }, 401,
+    { "x-magpie-sign-in": "expired", "retry-after": "7" }); }], { keepaliveMs: 5 });
+  const text = await (await h.send()).text();
+  assert.match(text, /response.failed/);
+  assert.match(text, /invalid_api_key/);
+  assert.match(text, /"http_status":401/);
+  assert.match(text, /"retry-after":"7"/);
+  assert.match(text, /"x-magpie-sign-in":"expired"/);
+  assert.equal(h.calls.length, 1);
+});
+
+test("a failed full Responses JSON result cannot become a successful late SSE completion", async () => {
+  const h = harness([async () => { await delay(30); return json({ id: "failed-json-id", status: "failed", error: null,
+    output: [{ type: "function_call", arguments: "failed-json-tool" }] }); }, () => sse(completed)], { keepaliveMs: 5 });
+  const text = await (await h.send()).text();
+  assert.doesNotMatch(text, /failed-json-id|failed-json-tool/);
+  assert.match(text, /new-good-history/);
+  assert.equal(h.calls.length, 2);
+});
+
+test("keepalive is optional and never changes non-streaming requests", async () => {
+  const h = harness([async () => { await delay(30); return json({ error: { code: "invalid_api_key" } }, 401); }], { keepaliveMs: 5 });
+  const response = await h.send({ ...history, stream: false });
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error.code, "invalid_api_key");
+  const disabled = harness([async () => { await delay(30); return sse(completed); }], { keepaliveMs: 0 });
+  assert.equal(await (await disabled.send()).text(), completed);
+});
+
 test("HTTP history errors clean only once and reuse cleanup through other retries", async () => {
   const h = harness([
     () => json({ error: encrypted }, 400),

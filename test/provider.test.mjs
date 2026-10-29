@@ -28,6 +28,13 @@ test("login UI has five modes, masks secrets and makes advanced fields condition
   for (const method of [github, linuxdo, token, api]) assert.ok(!method.prompts.some(prompt => prompt.key === "checkinEnabled"));
   for (const method of [github, linuxdo, api]) assert.ok(!method.prompts.some(prompt => ["password", "username", "accessToken", "cookie", "userId"].includes(prompt.key)));
   for (const method of hooks.auth.methods) assert.equal(method.prompts.find(prompt => prompt.key === "headers").when.key, "advanced");
+  for (const method of [password, github, linuxdo, token]) assert.ok(!method.prompts.some(prompt => ["email", "label", "alias"].includes(prompt.key)),
+    "do not offer a display-alias field when the host SDK cannot set a native alias");
+  const email = api.prompts.find(prompt => prompt.key === "email");
+  assert.match(email.message, /邮箱/);
+  assert.equal(email.validate("alice@example.test"), undefined);
+  assert.equal(email.validate(""), undefined);
+  assert.ok(email.validate("maodou38"), "an API-key name must not mistake a display remark for an email");
 });
 
 test("password login needs no separately entered API key and never stores an unapproved password", async t => {
@@ -35,7 +42,8 @@ test("password login needs no separately entered API key and never stores an una
     const calls = [];
     const hooks = await createProvider({}, {}, { fetchImpl: async (url, init) => {
       calls.push({ url, init });
-      return url.includes("/api/user/login") ? new Response(JSON.stringify({ success: true, data: { id: 123, username: "alice", checked_in: true } }), { headers: { "set-cookie": "session=signed-in; HttpOnly" } }) : json({ items: [key], total: 1 });
+      if (url.includes("/api/user/login")) return new Response(JSON.stringify({ success: true, data: { id: 123, username: "alice", checked_in: true } }), { headers: { "set-cookie": "session=signed-in; HttpOnly" } });
+      return url.includes("/api/user/self") ? json({ id: 123, username: "alice", email: "alice@example.test", checked_in: false }) : json({ items: [key], total: 1 });
     } });
     const result = await hooks.auth.methods[0].authorize({ site: "air", username: "alice", password: "site-secret", checkinEnabled: enabled });
     assert.equal(result.type, "success");
@@ -43,8 +51,11 @@ test("password login needs no separately entered API key and never stores an una
     assert.equal(account.key, "model-secret");
     assert.equal(account.checkinEnabled, enabled === "yes");
     assert.equal(account.password, enabled === "yes" ? "site-secret" : "");
+    assert.equal(account.email, "alice@example.test");
+    assert.equal(result.accountId, "alice@example.test");
+    assert.equal(account.lastCheckin.outcome, "claimed", "a read-only profile must not replace the actual login's check-in result");
     assert.ok(calls.every(call => call.url.startsWith("https://ps.air-outer.com/")));
-    assert.equal(calls.length, 2);
+    assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/api/user/login", "/api/user/self", "/api/token/"]);
     assert.ok(!calls.some(call => call.url.includes("/api/user/token")));
   });
 });
@@ -83,6 +94,63 @@ test("LinuxDO defaults to normal website login and an explicit site-session hand
   assert.equal((await flow.callback('{"cookie":"session=site-only","userId":"123"}')).type, "failed");
 });
 
+test("all site login paths use the verified profile identity, not an old display-alias input", async t => {
+  const ways = [[0, "password"], [3, "access-token"], [1, "github-code"], [2, "linuxdo-code"], [1, "github-session"], [2, "linuxdo-session"]];
+  for (const [index, way] of ways) for (const email of ["real@example.test", ""]) await t.test(`${way}: ${email ? "email" : "username fallback"}`, async () => {
+    const calls = [];
+    const hooks = await createProvider({}, {}, { fetchImpl: async (url, init) => {
+      const pathname = new URL(url).pathname;
+      calls.push({ pathname, init });
+      if (pathname === "/api/status") return json({ github_oauth: true, github_client_id: "github-fixture", linuxdo_oauth: true, linuxdo_client_id: "linuxdo-fixture" });
+      if (pathname === "/api/oauth/state") return json("one-use-state");
+      if (pathname === "/api/user/login" || /^\/api\/oauth\/(github|linuxdo)$/.test(pathname)) {
+        return new Response(JSON.stringify({ success: true, data: { id: 123, username: "from-login" } }), { headers: { "set-cookie": "session=verified; HttpOnly" } });
+      }
+      if (pathname === "/api/user/self") {
+        assert.equal(init.headers.get("new-api-user"), "123");
+        if (way === "access-token") assert.equal(init.headers.get("authorization"), "system-secret");
+        else assert.equal(init.headers.get("cookie"), "session=verified");
+        return json({ id: 123, username: "verified-site-name", email });
+      }
+      assert.equal(pathname, "/api/token/");
+      return json({ items: [key], total: 1 });
+    } });
+    const inputs = { site: "org", email: "maodou38", username: "login@example.test", password: "site-secret", accessToken: "system-secret", userId: "123", handoff: way.endsWith("session") ? "session" : "code" };
+    const method = hooks.auth.methods[index];
+    const authorized = await method.authorize(inputs);
+    const callback = way.endsWith("session") ? '{"cookie":"session=verified","userId":"123"}'
+      : `https://agentrouter.org/oauth/${way.startsWith("github") ? "github/magpie" : "linuxdo"}?code=one-use-code&state=one-use-state`;
+    const result = method.type === "oauth" ? await authorized.callback(callback) : authorized;
+    assert.equal(result.type, "success", result.error);
+    assert.equal(result.accountId, email || "verified-site-name");
+    assert.equal(result.uid, "agentrouter:123");
+    const account = readAccount(asAuth(result));
+    assert.equal(account.email, email);
+    assert.equal(account.label, "maodou38", "retain in-flight legacy remarks only as non-identity information");
+    assert.equal(account.username, "verified-site-name");
+    assert.equal(calls.filter(call => call.pathname === "/api/user/self").length, 1, "session and access-token paths already read the profile");
+    assert.equal(calls.filter(call => call.pathname === "/api/token/").length, 1);
+  });
+});
+
+test("profile verification fails closed before key lookup or persistence", async t => {
+  for (const failure of ["wrong-user", "unavailable"]) await t.test(failure, async () => {
+    const calls = [];
+    const hooks = await createProvider({ client: { auth: { set() { assert.fail("a failed login cannot persist credentials"); } } } }, {}, { fetchImpl: async url => {
+      calls.push(new URL(url).pathname);
+      if (url.endsWith("/api/user/login")) return new Response(JSON.stringify({ success: true, data: { id: 123, username: "alice" } }), { headers: { "set-cookie": "session=verified" } });
+      assert.ok(url.endsWith("/api/user/self"));
+      return failure === "wrong-user" ? json({ id: 456, username: "bob", email: "other@example.test" }) : new Response("Unavailable", { status: 503 });
+    } });
+    const result = await hooks.auth.methods[0].authorize({ username: "alice", password: "site-secret" });
+    assert.equal(result.type, "failed");
+    assert.equal(result.access, undefined);
+    assert.equal(result.refresh, undefined);
+    assert.deepEqual(calls, ["/api/user/login", "/api/user/self"]);
+    assert.doesNotMatch(result.error, /site-secret|session=verified|other@example/);
+  });
+});
+
 test("API-key-only accounts never call the site for quota or check-in", async () => {
   const hooks = await createProvider({}, {}, { fetchImpl: () => { throw new Error("No site calls allowed"); } });
   const auth = { type: "api", key: "model-secret", metadata: { site: "org" } };
@@ -104,6 +172,32 @@ test("read-only wallet data informs native balance routing without fake reset or
   assert.equal(usage.windows[0].unit, "USD");
   for (const name of ["used", "limit", "span", "resetsAt", "resetSecs"]) assert.equal(usage.windows[0][name], undefined);
   assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/api/user/self"]);
+});
+
+test("wallet reads leave account names, aliases and duplicate-name suffixes to the host", async t => {
+  for (const mode of ["password", "github", "linuxdo", "access-token", "legacy-session"]) await t.test(mode, async () => {
+    const accessToken = mode === "access-token" ? "system-token" : "";
+    const auths = [
+      stored({ mode, accessToken, label: "shared-label", username: "site-alice", session: accessToken ? "" : "session=alice" }),
+      stored({ mode, accessToken, label: "shared-label", username: "site-bob", userId: "456", session: accessToken ? "" : "session=bob" })
+    ];
+    const before = JSON.stringify(auths);
+    const calls = [];
+    const hooks = await createProvider({}, {}, { fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      const id = Number(new Headers(init.headers).get("new-api-user"));
+      return json({ id, username: `upstream-name-${id}`, quota: id * 500000 });
+    } });
+    for (const auth of auths) {
+      const usage = await hooks.auth.usage(async () => auth, {});
+      assert.equal(Object.hasOwn(usage, "user"), false, "neither the site username nor the bare label may replace the host's canonical account name");
+      assert.equal(usage.windows[0].balance, Number(readAccount(auth).userId));
+      assert.equal(usage.signIn, "kept");
+    }
+    assert.equal(JSON.stringify(auths), before, "wallet refresh must not rewrite names, UIDs or credentials");
+    assert.ok(calls.every(call => new URL(call.url).pathname === "/api/user/self" && call.init.method === "GET"));
+    assert.equal(calls.length, 2);
+  });
 });
 
 test("missing quota and WAF failures remain unknown, never password-login fallbacks", async t => {
@@ -170,14 +264,14 @@ test("model catalog honors account permissions, per-model protocols and explicit
   assert.equal(out["google-model"].limit.context, 0);
 });
 
-test("native per-model headers win and the loader never forces every model to one base URL", async () => {
+test("account custom headers override native defaults and the loader never forces every model to one base URL", async () => {
   let captured;
   const hooks = await createProvider({}, {}, { fetchImpl: async (url, init) => { captured = { url, init }; return json({ ok: true }); } });
   const loaded = await hooks.auth.loader(async () => stored({ headers: "X-Selected: account-default" }), {});
   assert.equal(loaded.baseURL, undefined);
   await loaded.fetch("https://custom.example/v1/messages", { method: "POST", body: '{"model":"unchanged"}', headers: { "x-selected": "current-model", "x-api-key": "old-key", cookie: "session=must-not-leak" } });
   assert.equal(captured.url, "https://custom.example/v1/messages");
-  assert.equal(captured.init.headers.get("x-selected"), "current-model");
+  assert.equal(captured.init.headers.get("x-selected"), "account-default");
   assert.equal(captured.init.headers.get("x-api-key"), "model-secret");
   assert.equal(captured.init.headers.get("cookie"), null);
   assert.equal(captured.init.body, '{"model":"unchanged"}');

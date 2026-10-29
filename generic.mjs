@@ -1,5 +1,8 @@
 import { cleanResponsesRequest, createFilteredFetch, defaultRetryDelay, fetchWithFilter,
   historyErrorCode, retryErrorClass } from "./lib/responses-filter.mjs";
+import { resolveModelMetadata } from "./lib/model-metadata.mjs";
+import { createModelRegistry } from "./lib/model-registry.mjs";
+import { readBoundedText } from "./lib/site-client.mjs";
 
 const DEFAULT_PROVIDER_ID = "auto-codex-filter";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
@@ -23,11 +26,8 @@ function normalizeModels(models) {
     result[key] = {
       ...model,
       id: model.id ?? key,
-      name: model.name ?? model.id ?? key,
-      limit: model.limit ?? { context: 400000, output: 64000 }
+      name: model.name ?? model.id ?? key
     };
-    if (model.reasoning === undefined) result[key].reasoning = true;
-    if (model.tool_call === undefined) result[key].tool_call = true;
   }
   return result;
 }
@@ -35,7 +35,10 @@ function normalizeModels(models) {
 async function plugin(input = {}, options = {}) {
   const providerId = options.providerId || DEFAULT_PROVIDER_ID;
   const models = normalizeModels(options.models);
+  let explicit = { models };
+  const loadRegistry = createModelRegistry(options.modelsRegistryPath ? { paths: [options.modelsRegistryPath] } : {});
   const configuredBaseURL = options.baseURL ? normalizeBaseURL(options.baseURL) : undefined;
+  const accountBaseURL = auth => normalizeBaseURL(auth?.metadata?.baseURL || explicit.api || configuredBaseURL || DEFAULT_BASE_URL);
   const prompts = configuredBaseURL ? [] : [{
     type: "text",
     key: "baseURL",
@@ -54,6 +57,7 @@ async function plugin(input = {}, options = {}) {
   return {
     config: async cfg => {
       cfg.provider ??= {};
+      explicit = structuredClone(cfg.provider[providerId] ?? { models });
       cfg.provider[providerId] ??= {
         name: options.providerName || "Auto Codex Filter",
         npm: "@ai-sdk/openai",
@@ -72,7 +76,7 @@ async function plugin(input = {}, options = {}) {
       }],
       async loader(getAuth) {
         const auth = await getAuth();
-        const baseURL = normalizeBaseURL(auth?.metadata?.baseURL || configuredBaseURL || DEFAULT_BASE_URL);
+        const baseURL = accountBaseURL(auth);
         const headers = new Headers();
         if (auth?.key) headers.set("authorization", `Bearer ${auth.key}`);
         const filtered = createFilteredFetch((request, init) => {
@@ -91,23 +95,46 @@ async function plugin(input = {}, options = {}) {
     provider: {
       id: providerId,
       async models(provider, { auth } = {}) {
+        const fallback = () => {
+          const result = Object.fromEntries(Object.entries(provider.models ?? {}).filter(([name]) => explicit.models?.[name] && !explicit.models[name].disabled)
+            .map(([name, base]) => {
+              const user = explicit.models[name];
+              return [name, { ...base, ...resolveModelMetadata({ id: user.id || name, providerId, user, base }) }];
+            }));
+          result[Symbol.for("magpie.fellBack")] = true;
+          return result;
+        };
         try {
-          const baseURL = normalizeBaseURL(auth?.metadata?.baseURL || configuredBaseURL || DEFAULT_BASE_URL);
+          const baseURL = accountBaseURL(auth);
           const headers = new Headers();
           if (auth?.key) headers.set("authorization", `Bearer ${auth.key}`);
-          const response = await fetch(baseURL + "/models", { headers });
-          if (!response.ok) return provider.models;
-          const catalog = await response.json();
-          if (!Array.isArray(catalog?.data)) return provider.models;
-          return Object.fromEntries(catalog.data
-            .filter(model => typeof model?.id === "string" && model.id)
-            .map(model => [model.id, {
-              ...provider.models[model.id],
-              id: model.id,
-              name: model.name ?? model.id
-            }]));
+          const response = await fetch(baseURL + "/models", { headers, redirect: "error", signal: AbortSignal.timeout(25000) });
+          if (!response.ok) { await response.body?.cancel(); return fallback(); }
+          const catalog = JSON.parse(await readBoundedText(response));
+          if (!Array.isArray(catalog?.data)) return fallback();
+          const registry = await loadRegistry();
+          const rows = catalog.data.filter(model => typeof model?.id === "string" && model.id);
+          for (const [name, user] of Object.entries(explicit.models ?? {})) {
+            const id = user.id || name;
+            if (!user.disabled && !rows.some(row => row.id === id)) rows.push({ id });
+          }
+          const result = {};
+          for (const row of rows) {
+            const aliases = Object.entries(explicit.models ?? {}).filter(([name, user]) => (user.id || name) === row.id);
+            for (const [name, user] of aliases.length ? aliases : [[row.id, {}]]) {
+              if (user.disabled) continue;
+              const base = provider.models?.[name] ?? provider.models?.[row.id] ?? {};
+              result[name] = {
+                ...base, id: name, name: user.name || row.name || base.name || name,
+                api: { ...base.api, id: row.id, url: user.provider?.api || baseURL, npm: user.provider?.npm || explicit.npm || "@ai-sdk/openai" },
+                ...resolveModelMetadata({ id: row.id, providerId, registry, row, user, base }),
+                options: { ...base.options, ...user.options }, headers: { ...base.headers, ...user.headers }
+              };
+            }
+          }
+          return result;
         } catch {
-          return provider.models;
+          return fallback();
         }
       }
     }

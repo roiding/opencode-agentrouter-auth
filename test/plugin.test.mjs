@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import module, { _internal } from "../generic.mjs";
 
 const { cleanResponsesRequest, fetchWithFilter, historyErrorCode } = _internal;
@@ -98,18 +99,40 @@ test("model catalog is discovered from the configured Responses endpoint", async
     });
   };
   try {
-    const hooks = await module.server({});
+    const hooks = await module.server({}, { modelsRegistryPath: fileURLToPath(new URL("./fixtures/models.json", import.meta.url)) });
+    await hooks.config({});
     const models = await hooks.provider.models({ models: {} }, {
       auth: { key: "test-key", metadata: { baseURL: "https://gateway.example/v1" } }
     });
-    assert.deepEqual(requested, [{
-      input: "https://gateway.example/v1/models",
-      init: { headers: new Headers({ authorization: "Bearer test-key" }) }
-    }]);
+    assert.equal(requested.length, 1);
+    assert.equal(requested[0].input, "https://gateway.example/v1/models");
+    assert.deepEqual(requested[0].init.headers, new Headers({ authorization: "Bearer test-key" }));
+    assert.equal(requested[0].init.redirect, "error");
+    assert.ok(requested[0].init.signal instanceof AbortSignal);
     assert.deepEqual(Object.keys(models), ["request-model-a", "request-model-b"]);
+    assert.equal(models["request-model-a"].api.url, "https://gateway.example/v1");
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("generic metadata uses the same resolver, preserves aliases and never invents default limits", async () => {
+  assert.equal(_internal.normalizeModels(["unknown"]).unknown.limit, undefined);
+  assert.equal(_internal.normalizeModels(["unknown"]).unknown.reasoning, undefined);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ data: [{ id: "gpt-fixture-exact" }] });
+  try {
+    const hooks = await module.server({}, { baseURL: "https://gateway.example/v1",
+      modelsRegistryPath: fileURLToPath(new URL("./fixtures/models.json", import.meta.url)),
+      models: { friendly: { id: "gpt-fixture-exact", limit: { input: 70000 } } } });
+    await hooks.config({});
+    const models = await hooks.provider.models({ models: {} }, { auth: { key: "fixture-only" } });
+    assert.deepEqual(Object.keys(models), ["friendly"]);
+    assert.deepEqual(models.friendly.limit, { context: 100000, input: 70000, output: 10000 });
+    assert.deepEqual(Object.keys(models.friendly.variants), ["none", "high"]);
+    assert.equal(models.friendly.api.id, "gpt-fixture-exact");
+    assert.equal(models.friendly.api.url, "https://gateway.example/v1");
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("only precise encrypted-resource errors trigger cleanup", () => {

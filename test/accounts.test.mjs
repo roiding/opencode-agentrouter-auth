@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountCapabilities, assertSameUser, beijingDay, protocolBase, readAccount, saveAccount } from "../lib/accounts.mjs";
+import { accountCapabilities, assertSameUser, beijingDay, protocolBase, readAccount, saveAccount, withSiteIdentity } from "../lib/accounts.mjs";
 
 const account = (extra = {}) => ({
   schema: 2, provider: "agentrouter", mode: "password", site: "air",
@@ -67,6 +67,71 @@ test("UID validation prevents cross-account session replacement", () => {
   assert.throws(() => assertSameUser(account(), { id: 124 }), /不一致/);
   assert.throws(() => assertSameUser(account(), {}), /缺失/);
   assert.equal(saveAccount(account({ site: "org" })).uid, saveAccount(account({ site: "air" })).uid);
+});
+
+test("account names prefer real email, then site username or UID, never the display remark", () => {
+  for (const mode of ["password", "github", "linuxdo", "access-token", "legacy-session"]) {
+    const state = account({ mode, label: "shared-label", email: " alice@example.test " });
+    assert.equal(saveAccount(state).accountId, "alice@example.test");
+    assert.equal(saveAccount({ ...state, email: "" }).accountId, "alice");
+    assert.equal(saveAccount({ ...state, email: "not-an-email" }).accountId, "alice");
+    assert.equal(saveAccount({ ...state, email: "", username: "" }).accountId, "AgentRouter 123");
+  }
+});
+
+test("shared remarks do not create equal account names or collapse distinct UIDs", () => {
+  const alice = saveAccount(account({ label: "shared-label", email: "alice@example.test" }));
+  const bob = saveAccount(account({ label: "shared-label", email: "bob@example.test", userId: "456", username: "bob" }));
+  assert.equal(alice.accountId, "alice@example.test");
+  assert.equal(bob.accountId, "bob@example.test");
+  assert.notEqual(alice.uid, bob.uid);
+  assert.equal(readAccount(alice).label, "shared-label");
+  assert.equal(readAccount(bob).label, "shared-label");
+  const another = saveAccount(account({ email: "alice@example.test", userId: "789" }));
+  assert.notEqual(another.uid, alice.uid, "a shared email cannot override distinct site identities");
+});
+
+test("session refresh preserves both corrected and legacy native names until an explicit host migration", () => {
+  for (const accountId of ["alice@example.test", "old-remark"]) {
+    const original = { ...saveAccount(account({ label: "old-remark", email: "alice@example.test" })), accountId };
+    const before = JSON.stringify(original);
+    const refreshed = saveAccount({ ...readAccount(original), email: "new@example.test", username: "new-site-name", session: "session=new" }, original);
+    assert.equal(refreshed.accountId, accountId, "do not orphan native aliases or account-name routing settings");
+    assert.equal(refreshed.uid, original.uid);
+    assert.equal(readAccount(refreshed).label, "old-remark");
+    assert.equal(readAccount(refreshed).session, "session=new");
+    assert.equal(JSON.stringify(original), before);
+  }
+});
+
+test("legacy API metadata remarks are not emails and refresh preserves their native name", () => {
+  const original = { type: "api", key: "model-secret", metadata: {
+    email: "old-remark", username: "alice", password: "site-secret", userId: "123", session: "session=original", checkinEnabled: true
+  } };
+  const before = JSON.stringify(original);
+  const state = readAccount(original);
+  assert.equal(state.email, "");
+  assert.equal(state.label, "old-remark");
+  const refreshed = saveAccount({ ...state, session: "session=new" }, original);
+  assert.equal(refreshed.accountId, "old-remark", "preserve the host's metadata.email-derived name without treating it as a site email");
+  assert.equal(readAccount(refreshed).email, "");
+  assert.equal(readAccount(refreshed).label, "old-remark");
+  assert.equal(refreshed.uid, "agentrouter:123");
+  assert.equal(JSON.stringify(original), before);
+});
+
+test("site identity enrichment verifies UID and never promotes a remark into an email", () => {
+  const source = account({ label: "initial-alias", email: "" });
+  const enriched = withSiteIdentity(source, { id: 123, username: " site-alice ", email: " alice@example.test " });
+  assert.equal(enriched.email, "alice@example.test");
+  assert.equal(enriched.username, "site-alice");
+  assert.equal(enriched.label, "initial-alias");
+  assert.equal(source.email, "");
+  assert.equal(withSiteIdentity(source, { id: 123 }).email, "");
+  assert.equal(withSiteIdentity(enriched, { id: 123 }).email, "alice@example.test");
+  assert.equal(withSiteIdentity(enriched, { id: 123, email: "" }).email, "");
+  assert.equal(withSiteIdentity(enriched, { id: 123, email: "not-an-email" }).email, "");
+  assert.throws(() => withSiteIdentity(source, { id: 456, email: "other@example.test" }), /不一致/);
 });
 
 test("Beijing-day boundaries are independent of the runtime timezone", () => {

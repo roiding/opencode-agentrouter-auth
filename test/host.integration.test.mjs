@@ -21,7 +21,7 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
   t.after(() => rm(directory, { recursive: true, force: true }));
   const authPath = path.join(directory, "plugin-auth.json");
   const modelsDevPath = path.join(directory, "models.json");
-  await writeFile(modelsDevPath, "{}");
+  await writeFile(modelsDevPath, await readFile(new URL("./fixtures/models.json", import.meta.url)));
   const requests = [], attempts = new Map();
   const users = { alice: "123", bob: "456" };
   const server = http.createServer(async (req, res) => {
@@ -40,7 +40,8 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
     }
     if (req.url === "/api/user/self") {
       if (!session || req.headers["new-api-user"] !== session) return send({ success: false }, 401);
-      return send({ success: true, data: { id: Number(session), username: session === "123" ? "alice" : "bob", quota: Number(session) * 500000 } });
+      const name = session === "123" ? "alice" : "bob";
+      return send({ success: true, data: { id: Number(session), username: name, email: `${name}@example.test`, quota: Number(session) * 500000 } });
     }
     if (req.url.startsWith("/api/token/")) {
       if (!session || req.headers["new-api-user"] !== session) return send({ success: false }, 401);
@@ -49,7 +50,8 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
     if (req.url === "/v1/models") return send({ data: [
       { id: "fixture-responses", supported_endpoint_types: ["responses"], context_length: 10000 },
       { id: "fixture-messages", supported_endpoint_types: ["anthropic"], context_length: 10000 },
-      { id: "fixture-gemini", supported_endpoint_types: ["gemini"], context_length: 10000 }
+      { id: "fixture-gemini", supported_endpoint_types: ["gemini"], context_length: 10000 },
+      { id: "gpt-fixture-exact", supported_endpoint_types: ["responses"] }
     ] });
     if (req.url === "/v1/responses") {
       const key = req.headers.authorization;
@@ -107,12 +109,14 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
     pending.set(id, { resolve, reject, timer, events: [] });
     child.stdin.write(JSON.stringify({ id, method, params }) + "\n");
   });
-  const init = await rpc("init", { directory, authPath, modelsDevPath, plugins: [{ spec: root, target: root }] });
+  const init = await rpc("init", { directory, authPath, modelsDevPath,
+    config: { provider: { agentrouter: { models: { "gpt-fixture-exact": { limit: { input: 88000 } } } } } },
+    plugins: [{ spec: root, target: root, options: { modelsRegistryPath: modelsDevPath } }] });
   assert.equal(init.result.plugins.length, 1);
   assert.equal(init.result.plugins[0].error, undefined);
   const firstPrompt = await rpc("prompt", { provider: "agentrouter", method: 0 });
   assert.equal(firstPrompt.result.prompt.key, "site");
-  const answers = { site: "air", email: "same-label", checkinEnabled: "no", username: "alice", password: "test-password", advanced: "no" };
+  const answers = { site: "air", checkinEnabled: "no", username: "alice", password: "test-password", advanced: "no" };
   const filled = {}, asked = [];
   while (true) {
     const { result } = await rpc("prompt", { provider: "agentrouter", method: 0, inputs: filled });
@@ -122,24 +126,44 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
     assert.ok(Object.hasOwn(answers, result.prompt.key), "Unexpected additional credential question");
     filled[result.prompt.key] = answers[result.prompt.key];
   }
-  assert.deepEqual(asked, ["site", "email", "checkinEnabled", "username", "password", "advanced"]);
-  const login = async (username, site) => (await rpc("apiKey", { provider: "agentrouter", method: 0, inputs: {
-    site, email: "same-label", username, password: "test-password", checkinEnabled: "no", advanced: "no"
+  assert.deepEqual(asked, ["site", "checkinEnabled", "username", "password", "advanced"]);
+  const login = async (username, site, email = "same-label") => (await rpc("apiKey", { provider: "agentrouter", method: 0, inputs: {
+    site, email, username, password: "test-password", checkinEnabled: "no", advanced: "no"
   } })).result;
   const alice = await login("alice", "air");
   const bob = await login("bob", "org");
   assert.equal(alice.ok, true);
   assert.equal(bob.ok, true);
   assert.notEqual(alice.account, bob.account, "same label must not collapse two different site UIDs");
+  const again = await login("alice", "air", "changed-remark");
+  assert.equal(again.account, alice.account, "a changed in-flight remark must not create another login for the same site identity");
   const saved = await readFile(authPath, "utf8");
   assert.doesNotMatch(saved, /test-password/);
   assert.equal(Object.keys(JSON.parse(saved)).length, 2);
   assert.equal(JSON.parse(saved)[alice.account].uid, "agentrouter:123");
   assert.equal(JSON.parse(saved)[bob.account].uid, "agentrouter:456");
+  assert.equal(JSON.parse(saved)[alice.account].accountId, "alice@example.test");
+  assert.equal(JSON.parse(saved)[bob.account].accountId, "bob@example.test");
+  const providers = await rpc("providers");
+  const models = providers.result.find(provider => provider.id === "agentrouter").models;
+  assert.equal(models.some(model => model.id === "registry-only"), false);
+  const corresponding = models.find(model => model.id === "fixture-responses");
+  assert.deepEqual([corresponding.context, corresponding.input, corresponding.output], [10000, 8000, 2000]);
+  assert.equal(corresponding.reasoning, true);
+  assert.equal(corresponding.image, true);
+  assert.deepEqual(corresponding.variants, ["low", "medium", "high", "xhigh"]);
+  const original = models.find(model => model.id === "gpt-fixture-exact");
+  assert.deepEqual([original.context, original.input, original.output], [100000, 88000, 10000]);
+  assert.deepEqual(original.variants, ["none", "high"]);
   const usage = await rpc("usage", { provider: "agentrouter", account: alice.account, proxy: "direct" });
+  assert.equal(usage.result.user, "", "wallet results must not replace the real-email identity or its native alias");
   assert.equal(usage.result.windows[0].balance, 123);
   assert.equal(usage.result.windows[0].used, null);
   assert.equal(usage.result.windows[0].resetsAt, "");
+  const bobUsage = await rpc("usage", { provider: "agentrouter", account: bob.account, proxy: "direct" });
+  assert.equal(bobUsage.result.user, "");
+  assert.equal(bobUsage.result.windows[0].balance, 456);
+  assert.equal(await readFile(authPath, "utf8"), saved, "reading balances must not rewrite account identity or labels");
   const loaded = await rpc("load", { provider: "agentrouter", account: alice.account });
   assert.equal(loaded.result.baseURL, "");
   const body = { model: "fixture-responses", input: [{ type: "reasoning", encrypted_content: "private-history" }, { role: "user", content: "hello" }], stream: true };

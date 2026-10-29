@@ -46,6 +46,20 @@ test("account reads are read-only and reject another user's data", async () => {
   assert.doesNotMatch(JSON.stringify(h.calls.map(call => call.init.body)), /private-password/);
 });
 
+test("login profile acquisition enriches verified identity and retains any rotated site session", async () => {
+  const h = harness([json({ id: 123, username: "site-alice", email: "alice@example.test" }, { "set-cookie": "session=rotated; HttpOnly" })]);
+  const source = account({ userId: "123", session: "session=original", label: "display-alias" });
+  const result = await h.client.profile(source);
+  assert.equal(result.profileVerified, true);
+  assert.equal(result.account.email, "alice@example.test");
+  assert.equal(result.account.username, "site-alice");
+  assert.equal(result.account.label, "display-alias");
+  assert.equal(result.account.session, "session=rotated");
+  assert.equal(source.session, "session=original");
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].init.method, "GET");
+});
+
 test("wrong-user login is not a session update", async () => {
   const h = harness([json({ id: 124, username: "bob" }, { "set-cookie": "session=wrong-user" })]);
   const state = account({ userId: "123", session: "session=original" });
@@ -177,12 +191,12 @@ test("missing or malformed quota values are not zero", () => {
   assert.equal(quotaNumber("123.5"), 123.5);
 });
 
-test("custom headers honor incoming native overrides but cannot leak account credentials", () => {
+test("account custom headers override native defaults but cannot leak account credentials", () => {
   for (const header of ["Authorization: token", "Cookie: session=x", "New-Api-User: 123", "X-Api-Key: key"]) assert.throws(() => customHeaders(header), /由所选账号或传输层管理/);
   const state = account({ headers: "X-Account: alice\nX-Selected-Model: default\nUser-Agent: custom-client" });
   for (const [protocol, expected] of [["responses", "authorization"], ["chat", "authorization"], ["anthropic", "x-api-key"], ["gemini", "x-goog-api-key"]]) {
     const headers = inferenceHeaders(state, { "x-selected-model": "native-model", cookie: "session=never-forward", authorization: "gateway-key", "new-api-user": "123" }, protocol);
-    assert.equal(headers.get("x-selected-model"), "native-model");
+    assert.equal(headers.get("x-selected-model"), "default");
     assert.equal(headers.get("x-account"), "alice");
     assert.equal(headers.get("user-agent"), "custom-client");
     assert.equal(headers.get("cookie"), null);
@@ -190,6 +204,41 @@ test("custom headers honor incoming native overrides but cannot leak account cre
     assert.equal(headers.get(expected), expected === "authorization" ? "Bearer private-model-key" : "private-model-key");
     assert.equal(["authorization", "x-api-key", "x-goog-api-key"].filter(name => headers.has(name)).length, 1);
   }
+});
+
+test("model requests pass native headers through; codex identity only repairs Responses", () => {
+  const state = account();
+  const spoofed = inferenceHeaders(state, { "user-agent": "magpie/0.1.1813", "x-request": "kept" }, "responses");
+  assert.equal(spoofed.get("user-agent"), "codex_cli_rs/0.101.0");
+  assert.equal(spoofed.get("originator"), "codex_cli_rs");
+  assert.equal(spoofed.get("x-request"), "kept");
+  const genuine = inferenceHeaders(state, { "user-agent": "codex_cli_rs/0.99.0", originator: "codex_cli_rs" }, "responses");
+  assert.equal(genuine.get("user-agent"), "codex_cli_rs/0.99.0");
+  const chat = inferenceHeaders(state, { "user-agent": "magpie/0.1.1813" }, "chat");
+  assert.equal(chat.get("user-agent"), "magpie/0.1.1813");
+  assert.equal(chat.has("originator"), false);
+  const disabled = inferenceHeaders(state, { "user-agent": "magpie/0.1.1813" }, "responses", false);
+  assert.equal(disabled.get("user-agent"), "magpie/0.1.1813");
+  const custom = inferenceHeaders(account({ headers: "User-Agent: my-client" }), { "user-agent": "magpie/0.1.1813" }, "responses");
+  assert.equal(custom.get("user-agent"), "my-client");
+});
+
+test("site requests default to browser headers that account or handoff headers override", async () => {
+  const read = harness([json({ id: 123, quota: 0 })]);
+  await read.client.self(account({ userId: "123", accessToken: "system-token" }));
+  const headers = read.calls[0].init.headers;
+  assert.match(headers.get("user-agent"), /^Mozilla\/5\.0 .*Chrome\//);
+  assert.equal(headers.get("accept"), "application/json, text/plain, */*");
+  assert.match(headers.get("accept-language"), /^zh-CN/);
+  assert.equal(headers.get("referer"), "https://ps.air-outer.com/");
+  assert.equal(headers.has("origin"), false);
+  const login = harness([json({ id: 123, username: "alice" }, { "set-cookie": "session=site-session; Path=/" })]);
+  await login.client.login(account());
+  assert.equal(login.calls[0].init.headers.get("origin"), "https://ps.air-outer.com");
+  const override = harness([json({ id: 123, quota: 0 })]);
+  await override.client.self(account({ userId: "123", accessToken: "system-token", headers: "User-Agent: my-client\nAccept: application/xml" }));
+  assert.equal(override.calls[0].init.headers.get("user-agent"), "my-client");
+  assert.equal(override.calls[0].init.headers.get("accept"), "application/xml");
 });
 
 test("completed-site handoff imports only AgentRouter credentials and keeps browser headers site-only", async () => {

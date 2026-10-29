@@ -48,6 +48,30 @@ The account's site UID is authoritative. Reauthentication and check-in must not
 replace it with another user's data. Account labels are display information,
 not an identity or secret. Do not deduplicate different users by a shared label.
 
+New account envelopes use the verified site's email as `accountId`, falling
+back to its username and finally its UID, never the remark. Login/OAuth exchange
+responses can omit email: read the authenticated profile and verify its UID
+before key lookup and persistence. Session import and system-token login already
+read this profile and must not read it twice. A profile failure is not permission
+to guess identity. Keep the actual login's check-in result separate from this
+read-only profile response.
+
+The current host SDK exposes no login-time native-alias setter. Do not offer a
+fake alias prompt, repurpose its `email` field for a remark, invent a no-op SDK
+method, or rewrite native configuration files. Let users set display aliases
+through Magpie's native rename operation after login. The pure model-key method
+may accept an optional actual email but cannot verify it with site credentials.
+Legacy in-flight remarks remain in `label`, not the canonical account name.
+
+Keep both corrected and legacy `accountId` values stable during session updates
+so native aliases and name-keyed routing are not orphaned. Migration of existing
+records requires the host to preserve their slots and name-keyed settings; the
+current host does not deduplicate equal UIDs with different names on re-add.
+`auth.usage` leaves `user` unset and never migrates credentials. Distinct site
+UIDs must stay distinct even if their actual email addresses match. Slot suffixes
+for truly duplicate/unknown identities remain the host's concern; shared display
+aliases alone must not manufacture a duplicate canonical account name.
+
 Account modes that acquire a key use an OAuth-shaped Magpie storage envelope
 with `expires: 0` and versioned plugin state in `refresh`, as the native ZCode
 plugin does. This is a storage envelope, not a GitHub/LinuxDO refresh token.
@@ -113,10 +137,20 @@ forward site cookies, site access tokens or passwords to inference endpoints.
 
 Discover models per account. Preserve explicit user model declarations/settings
 as manual overrides and trusted fallback lists; the upstream still enforces
-their permissions. Public pricing metadata can describe protocols but cannot
+their permissions. Public pricing/registry metadata can describe capabilities but cannot
 by itself add models absent from the account's catalog. Do not invent a default
 model, context limit, quota, or permission. An explicit model API address must
 not be defeated by an unconditional loader baseURL.
+
+Resolve model metadata per field: user declarations, authenticated discovery,
+provider public metadata, corresponding registry, exact manufacturer model,
+conservative family consensus, then host fallback. Keep total context, input
+ceiling and output ceiling separate. Preserve explicit false capabilities and
+derive effort variants only from declarations, never a universal model-name
+heuristic. Family inference requires multiple agreeing manufacturer entries;
+do not union differing effort sets. The raw registry cache is read-only and
+anonymous network fallback is bounded; neither source creates account access.
+Do not edit regenerated Codex catalogs. Both provider entry points use this resolver.
 
 The native gateway can retain the first seat's URL while trying another account.
 The loader therefore resolves the selected account's default endpoint at dispatch,
@@ -145,11 +179,18 @@ through without speculative repair or replay.
 6. Hold SSE output until a protocol-valid terminal result. Discard failed attempt
    text and client tool calls. Legitimate refusals/length stops are terminal,
    not transport failures. Keep usage trailers where the protocol requires them.
+   While buffering, allow bounded non-content keepalive events with no attempt
+   IDs. Comments alone do not count as Codex SSE event activity. Keepalive does
+   not reset upstream idle/deadline timers or relax cancellation/retry budgets.
 7. Responses uses completed/incomplete events; Chat uses completed choices and
    DONE; Anthropic uses message_stop; Gemini uses completed candidates or a
    terminal prompt block plus a well-formed normal stream end.
 8. Preserve authoritative status, error details and routing/auth hints. Remove
    stale content-length/content-encoding only when returning decoded/rebuilt data.
+   Fast errors retain HTTP semantics. Once keepalive commits an SSE response,
+   encode late errors in-band with original status and hints; never append bare
+   JSON or claim successful completion. Full original response headers cannot
+   be restored after commitment; callers requiring them can disable keepalive.
 9. Log structural diagnostics only. No prompt, body, password, cookie, token,
    authorization URL, state or code belongs in logs.
 10. Buffering is not upstream exactly-once execution. Retried hosted tools and
