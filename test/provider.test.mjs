@@ -161,17 +161,28 @@ test("API-key-only accounts never call the site for quota or check-in", async ()
   assert.equal((await hooks.auth.checkin(async () => auth, {})).outcome, "ineligible");
 });
 
-test("read-only wallet data informs native balance routing without fake reset or percentage windows", async () => {
+test("wallet usage exposes the site's used and remaining amounts without fake reset windows", async () => {
   const calls = [];
   const hooks = await createProvider({}, {}, { fetchImpl: async (url, init) => {
-    calls.push({ url, init }); return json({ id: 123, username: "alice", quota: 1250000, used_quota: 999999999 });
+    calls.push({ url, init }); return json({ id: 123, username: "alice", quota: 1250000, used_quota: 3750000 });
   } });
   const usage = await hooks.auth.usage(async () => stored(), {});
   assert.equal(usage.balance, "$2.50");
-  assert.equal(usage.windows[0].balance, 2.5);
+  assert.equal(usage.windows[0].used, 75);
+  assert.equal(usage.windows[0].amount, 7.5);
+  assert.equal(usage.windows[0].limit, 10);
   assert.equal(usage.windows[0].unit, "USD");
-  for (const name of ["used", "limit", "span", "resetsAt", "resetSecs"]) assert.equal(usage.windows[0][name], undefined);
+  for (const name of ["balance", "span", "resetsAt", "resetSecs"]) assert.equal(usage.windows[0][name], undefined);
   assert.deepEqual(calls.map(call => new URL(call.url).pathname), ["/api/user/self"]);
+});
+
+test("wallet balance remains the routing fallback when cumulative spend is unavailable", async () => {
+  const hooks = await createProvider({}, {}, { fetchImpl: async () => json({ id: 123, username: "alice", quota: 1250000 }) });
+  const usage = await hooks.auth.usage(async () => stored(), {});
+  assert.equal(usage.balance, "$2.50");
+  assert.equal(usage.windows[0].balance, 2.5);
+  assert.equal(usage.windows[0].used, undefined);
+  assert.equal(usage.windows[0].limit, undefined);
 });
 
 test("wallet reads leave account names, aliases and duplicate-name suffixes to the host", async t => {

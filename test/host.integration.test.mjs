@@ -41,7 +41,10 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
     if (req.url === "/api/user/self") {
       if (!session || req.headers["new-api-user"] !== session) return send({ success: false }, 401);
       const name = session === "123" ? "alice" : "bob";
-      return send({ success: true, data: { id: Number(session), username: name, email: `${name}@example.test`, quota: Number(session) * 500000 } });
+      return send({ success: true, data: {
+        id: Number(session), username: name, email: `${name}@example.test`,
+        quota: Number(session) * 500000, used_quota: Number(session) * 1500000
+      } });
     }
     if (req.url.startsWith("/api/token/")) {
       if (!session || req.headers["new-api-user"] !== session) return send({ success: false }, 401);
@@ -157,12 +160,17 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
   assert.deepEqual(original.variants, ["none", "high"]);
   const usage = await rpc("usage", { provider: "agentrouter", account: alice.account, proxy: "direct" });
   assert.equal(usage.result.user, "", "wallet results must not replace the real-email identity or its native alias");
-  assert.equal(usage.result.windows[0].balance, 123);
-  assert.equal(usage.result.windows[0].used, null);
+  assert.equal(usage.result.windows[0].balance, null);
+  assert.equal(usage.result.windows[0].used, 75);
+  assert.equal(usage.result.windows[0].amount, 369);
+  assert.equal(usage.result.windows[0].limit, 492);
+  assert.equal(usage.result.windows[0].unit, "USD");
   assert.equal(usage.result.windows[0].resetsAt, "");
   const bobUsage = await rpc("usage", { provider: "agentrouter", account: bob.account, proxy: "direct" });
   assert.equal(bobUsage.result.user, "");
-  assert.equal(bobUsage.result.windows[0].balance, 456);
+  assert.equal(bobUsage.result.windows[0].used, 75);
+  assert.equal(bobUsage.result.windows[0].amount, 1368);
+  assert.equal(bobUsage.result.windows[0].limit, 1824);
   assert.equal(await readFile(authPath, "utf8"), saved, "reading balances must not rewrite account identity or labels");
   const loaded = await rpc("load", { provider: "agentrouter", account: alice.account });
   assert.equal(loaded.result.baseURL, "");

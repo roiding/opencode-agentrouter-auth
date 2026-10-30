@@ -117,8 +117,11 @@ GitHub/LinuxDO session belongs in this plugin.
 ## Check-in, balances and routing
 
 `usage` is read-only. It never falls back to login. Unknown balances are not
-zero, and token allowances or cumulative spend are not account balances.
-An API-only account returns no fabricated quota window.
+zero, and token allowances or cumulative spend are not account balances. When
+the site reports both remaining quota and cumulative spend, expose their sum as
+the window total so Magpie's Used/Left switch has a real share. When cumulative
+spend is absent, use the wallet balance alone for routing. An API-only account
+returns no fabricated quota window.
 
 `checkin` requires account opt-in plus site username/password and runs only when
 Magpie schedules it. Deduplicate concurrent and completed Beijing-day attempts

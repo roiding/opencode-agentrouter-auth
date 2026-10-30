@@ -92,6 +92,15 @@ Magpie 0.1.1976 source):
   byte-for-byte that renaming leaves plugin credentials unchanged. No installed
   host or real account files are patched to work around native presentation.
 
+Allowance-window behavior (reviewed 2026-10-30 against installed Magpie
+0.1.2173):
+
+- A plugin usage window carrying `balance` is treated as a wallet-only figure,
+  so the host's global Used/Left switch leaves it unchanged. AgentRouter reports
+  `quota` (remaining) and `used_quota` (cumulative spend), so the plugin maps
+  their real share to `used`, spend to `amount`, and their sum to `limit`.
+  Balance-only data remains the fallback when cumulative spend is unavailable.
+
 This package is self-contained: all runtime sources, tests and documentation
 live at the repository root. Update this record whenever an external reference
 informs a behavioral decision, and keep attribution for adapted MIT code.
