@@ -20,9 +20,9 @@ const registry = {
 };
 const resolve = (extra = {}) => resolveModelMetadata({ id: "gpt-fixture-b", providerId: "agentrouter", registry, ...extra });
 
-test("original registry restores exact model efforts and distinct total/input/output limits", () => {
+test("original registry restores exact model efforts and keeps the maker's input cap to itself", () => {
   const result = resolve({ base: { capabilities: { reasoning: false }, variants: {} } });
-  assert.deepEqual(result.limit, { context: 1000000, input: 872000, output: 128000 });
+  assert.deepEqual(result.limit, { context: 1000000, input: 0, output: 128000 });
   assert.equal(result.capabilities.reasoning, true);
   assert.equal(result.capabilities.toolcall, true);
   assert.equal(result.capabilities.temperature, false);
@@ -31,6 +31,14 @@ test("original registry restores exact model efforts and distinct total/input/ou
   assert.deepEqual(Object.keys(result.variants), ["low", "medium", "high", "xhigh"]);
   assert.deepEqual(result.variants.xhigh, { reasoningEffort: "xhigh" });
   assert.equal(result.variants.none, undefined);
+});
+
+test("a registry input cap never lowers the window agents are told; a first-party one does", () => {
+  const inherited = resolve();
+  assert.equal(inherited.limit.input, 0);
+  assert.equal(inherited.limit.context, 1000000);
+  const pricing = resolve({ pricing: { limit: { input: 400000 } } });
+  assert.deepEqual(pricing.limit, { context: 1000000, input: 400000, output: 128000 });
 });
 
 test("corresponding provider registry takes priority over the manufacturer's profile", () => {

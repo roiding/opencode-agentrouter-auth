@@ -86,7 +86,7 @@ GitHub 也可选择这种完整网页登录后的交接方式。LinuxDO 的未�
 
 **没有默认模型。** 模型目录按账号发现，公共元数据只补充已发现模型的协议、能力、推理档位和上限，不凭公共定价表或注册表扩大账号可用列表。用户显式声明的模型和 API 地址作为人工覆盖保留，最终权限仍由上游校验。发现失败时保留可信缓存/显式配置，不退回写死的模型名单。
 
-模型元数据逐字段按以下优先级解析：用户覆盖、账号 `/models` 声明、本站 `/api/pricing`、对应服务商注册表、原厂精确型号、可信同族信息，最后才使用宿主已有字段。读取 `limit.context/input/output`、`reasoning_options`、推理/工具/输入输出模态等能力；将原厂声明的 effort 转成 `capabilities.reasoning` 和 `variants`，不统一塞入 `low/medium/high/xhigh`。用户可通过 `variants.<档位>.disabled` 隐藏档位；显式 `reasoning: false` 禁用推理档位。仅有 toggle 或 budget 控制时不编造 effort 档位。
+模型元数据逐字段按以下优先级解析：用户覆盖、账号 `/models` 声明、本站 `/api/pricing`、对应服务商注册表、原厂精确型号、可信同族信息，最后才使用宿主已有字段。读取 `limit.context/input/output`、`reasoning_options`、推理/工具/输入输出模态等能力；将原厂声明的 effort 转成 `capabilities.reasoning` 和 `variants`，不统一塞入 `low/medium/high/xhigh`。用户可通过 `variants.<档位>.disabled` 隐藏档位；显式 `reasoning: false` 禁用推理档位。仅有 toggle 或 budget 控制时不编造 effort 档位。注册表只补充总上下文 `context` 和输出上限 `output`，不提供 `input`：Magpie 把插件模型的 `input` 直接当作告知 agent（并导出给 Codex）的窗口，继承厂商规格会把 1M 总窗口压成 922k 输入上限，模型选择器的 1M 徽标也会因此消失；`input` 只认用户覆盖、账号声明、本站 pricing 或宿主已有配置。
 
 优先只读宿主的原始 `models.json` 缓存，避免宿主规范化时丢失 `reasoning_options`；缓存不可用时匿名读取 `https://models.dev/api.json`，不发送账号凭据。内存缓存每五分钟重新检查，可用插件选项 `modelsRegistryPath` 指定只读注册表路径。带日期的别名仅在完整基型号的多个已知版本一致时回退；其他同族回退必须有明确 family 声明，并且只补充原厂多个同族成员一致的字段。不同型号对 `none` 等档位存在分歧时不取并集。
 

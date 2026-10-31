@@ -148,12 +148,17 @@ not be defeated by an unconditional loader baseURL.
 Resolve model metadata per field: user declarations, authenticated discovery,
 provider public metadata, corresponding registry, exact manufacturer model,
 conservative family consensus, then host fallback. Keep total context, input
-ceiling and output ceiling separate. Preserve explicit false capabilities and
-derive effort variants only from declarations, never a universal model-name
-heuristic. Family inference requires multiple agreeing manufacturer entries;
-do not union differing effort sets. The raw registry cache is read-only and
-anonymous network fallback is bounded; neither source creates account access.
-Do not edit regenerated Codex catalogs. Both provider entry points use this resolver.
+ceiling and output ceiling separate. The registry never supplies the input
+ceiling: Magpie serves a plugin model's input as the window agents are told
+and Codex is exported, so an inherited maker's spec would advertise a 922k
+prompt cap in place of the 1M total context. Only user declarations, the
+account's discovery, the site's pricing or host fallback set input. Preserve
+explicit false capabilities and derive effort variants only from declarations,
+never a universal model-name heuristic. Family inference requires multiple
+agreeing manufacturer entries; do not union differing effort sets. The raw
+registry cache is read-only and anonymous network fallback is bounded; neither
+source creates account access. Do not edit regenerated Codex catalogs. Both
+provider entry points use this resolver.
 
 The native gateway can retain the first seat's URL while trying another account.
 The loader therefore resolves the selected account's default endpoint at dispatch,
