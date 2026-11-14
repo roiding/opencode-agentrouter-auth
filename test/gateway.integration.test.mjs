@@ -26,7 +26,7 @@ test("installed Magpie gateway: native names, aliases and account failover witho
   await mkdir(cache, { recursive: true });
   await writeFile(path.join(cache, "models.json"), await readFile(new URL("./fixtures/models.json", import.meta.url)));
   let child, output = "";
-  let finishStream, upstreamFrames = 0;
+  let finishStream, upstreamFrames = 0, resourceFailed = false, sessionFailed = false;
   const calls = [];
   const server = http.createServer(async (req, res) => {
     const chunks = [];
@@ -45,6 +45,22 @@ test("installed Magpie gateway: native names, aliases and account failover witho
     if (req.url !== "/v1/responses") return send({ error: { message: "Unexpected fixture path" } }, 404);
     calls.push({ headers: req.headers, body });
     if (req.headers.authorization === "Bearer revoked-after-discovery") return send({ error: { type: "authentication_error", code: "invalid_api_key", message: "Key rejected" } }, 401);
+    if (!resourceFailed && JSON.parse(body).input?.some?.(item => item.encrypted_content === "fixture-private-history")) {
+      resourceFailed = true;
+      return send({ error: {
+        type: "invalid_request_error",
+        message: "OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=00000000000000000000000000000001]"
+      } }, 400);
+    }
+    if (!sessionFailed && req.headers["x-session-id"] === "fixture-session-base" &&
+        JSON.parse(body).input?.some?.(item => item.encrypted_content === "fixture-private-session")) {
+      sessionFailed = true;
+      return send({ error: {
+        type: "invalid_request_error",
+        code: "session_binding_invalidated",
+        message: "session binding invalidated: the model this session is bound to can no longer serve it; restart the task with a new session id [trace_id=00000000000000000000000000000002 code=30013]"
+      } }, 409);
+    }
     if (checkSseIdle && JSON.stringify(JSON.parse(body).input).includes("local slow fixture only")) {
       res.writeHead(200, { "content-type": "text/event-stream" });
       const progress = { type: "response.in_progress", response: { id: "resp_slow_original", status: "in_progress", output: [] } };
@@ -168,6 +184,69 @@ test("installed Magpie gateway: native names, aliases and account failover witho
   assert.ok(calls.every(call => JSON.parse(call.body).reasoning?.effort === "xhigh"));
   assert.deepEqual(calls.map(call => call.headers["x-test-upstream-origin"]), ["https://ps.air-outer.com", "https://agentrouter.org"]);
   assert.ok(calls.every(call => !call.headers.cookie && !call.headers["new-api-user"]));
+  const resourceHistory = {
+    model: "agentrouter/native-route-test", stream: false, store: true,
+    include: ["reasoning.encrypted_content"], reasoning: { effort: "high" },
+    input: [
+      { type: "reasoning", id: "old-reasoning", encrypted_content: "fixture-private-history" },
+      { type: "message", id: "old-message", role: "user", content: "local resource fixture only" },
+      { type: "function_call", id: "old-call", call_id: "fixture-pair", name: "lookup", arguments: "{}" },
+      { type: "function_call_output", id: "old-result", call_id: "fixture-pair", output: "keep-result" }
+    ]
+  };
+  const beforeResource = calls.length;
+  const resourceResponse = await fetch(base + "/v1/responses", {
+    method: "POST", headers: { authorization: "Bearer isolated-test-gateway", "content-type": "application/json" },
+    body: JSON.stringify(resourceHistory), signal: AbortSignal.timeout(12000)
+  });
+  const resourceResult = await resourceResponse.text();
+  assert.equal(resourceResponse.status, 200, resourceResult + "\n" + output);
+  assert.match(resourceResult, /native-failover-ok/);
+  const resourceCalls = calls.slice(beforeResource);
+  assert.equal(resourceFailed, true);
+  assert.equal(resourceCalls.length, 2, "redacted resource failures retry inside the selected account");
+  assert.ok(resourceCalls.every(call => call.headers.authorization === "Bearer working-account"));
+  const preserved = JSON.parse(resourceCalls[0].body), cleaned = JSON.parse(resourceCalls[1].body);
+  assert.deepEqual(preserved.input, resourceHistory.input);
+  assert.equal(cleaned.model, "native-route-test");
+  assert.equal(cleaned.store, false);
+  assert.deepEqual(cleaned.include, []);
+  assert.deepEqual(cleaned.input, [
+    { type: "message", role: "user", content: "local resource fixture only" },
+    { type: "function_call", call_id: "fixture-pair", name: "lookup", arguments: "{}" },
+    { type: "function_call_output", call_id: "fixture-pair", output: "keep-result" }
+  ]);
+  const sessionHistory = {
+    model: "agentrouter/native-route-test", stream: false, store: true,
+    include: ["reasoning.encrypted_content"], reasoning: { effort: "high" },
+    input: [
+      { type: "reasoning", id: "session-reasoning", encrypted_content: "fixture-private-session" },
+      { type: "message", id: "session-message", role: "user", content: "local session fixture only" }
+    ]
+  };
+  const beforeSession = calls.length;
+  const sessionResponse = await fetch(base + "/v1/responses", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer isolated-test-gateway", "content-type": "application/json",
+      "x-session-id": "fixture-session-base"
+    },
+    body: JSON.stringify(sessionHistory), signal: AbortSignal.timeout(12000)
+  });
+  const sessionResult = await sessionResponse.text();
+  assert.equal(sessionResponse.status, 200, sessionResult + "\n" + output);
+  assert.match(sessionResult, /native-failover-ok/);
+  const sessionCalls = calls.slice(beforeSession);
+  assert.equal(sessionFailed, true);
+  assert.equal(sessionCalls.length, 2, "invalidated bindings retry once inside the selected account");
+  assert.ok(sessionCalls.every(call => call.headers.authorization === "Bearer working-account"));
+  assert.deepEqual(JSON.parse(sessionCalls[0].body).input, sessionHistory.input);
+  assert.equal(sessionCalls[0].headers["x-session-id"], "fixture-session-base");
+  const rebound = JSON.parse(sessionCalls[1].body);
+  assert.equal(sessionCalls[1].headers["x-session-id"], "fixture-session-base-rebind-1");
+  assert.equal(rebound.store, false);
+  assert.deepEqual(rebound.include, []);
+  assert.deepEqual(rebound.input, [{ type: "message", role: "user", content: "local session fixture only" }]);
   if (checkSseIdle) {
     // The native gateway holds lead events for up to four minutes. Comments
     // do not reset Codex's five-minute EVENT idle clock: test the real path,

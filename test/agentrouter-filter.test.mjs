@@ -96,7 +96,9 @@ test("combined loader keeps account/header/session auth and filters only the mod
     assert.equal(call.init.headers.get("x-extra"), "also-kept");
     assert.equal(call.init.headers.get("x-session-id"), "same-session");
   }
-  assert.equal(logs.filter(row => row.body.message === "history-cleanup").length, 1);
+  const cleanup = logs.filter(row => row.body.message.startsWith("history-cleanup "));
+  assert.equal(cleanup.length, 1);
+  assert.deepEqual(JSON.parse(cleanup[0].body.message.slice("history-cleanup ".length)), cleanup[0].body.extra);
   assert.doesNotMatch(JSON.stringify(logs), /sk-private-test-key|private-site-password|private-site-token|private-session|private-message|private-reasoning/);
 });
 

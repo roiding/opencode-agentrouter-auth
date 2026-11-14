@@ -60,7 +60,10 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
       const key = req.headers.authorization;
       const count = (attempts.get(key) || 0) + 1;
       attempts.set(key, count);
-      if (key === "Bearer model-123" && count === 1) return send({ error: { type: "invalid_request_error", code: "invalid_encrypted_content", message: "Encrypted history cannot be verified." } }, 400);
+      if (key === "Bearer model-123" && count === 1) return send({ error: {
+        type: "invalid_request_error",
+        message: "OpenAI Responses bad request: The requested item was created under a different *** OpenAI resource. Use the same resource that created the item to access it. [trace_id=00000000000000000000000000000001]"
+      } }, 400);
       res.writeHead(200, { "content-type": "text/event-stream" });
       return res.end(frame({ response: { status: "completed", output: [{ type: "message", content: [{ text: "safe-result" }] }] } }, "response.completed"));
     }
@@ -193,5 +196,11 @@ test("installed Magpie host: keyless login, isolated accounts, real wallet metad
   assert.equal(a[0].headers["x-test-upstream-origin"], "https://ps.air-outer.com");
   assert.equal(b[0].headers["x-test-upstream-origin"], "https://agentrouter.org");
   assert.ok([...a, ...b].every(request => !request.headers.cookie && !request.headers["new-api-user"]));
+  const cleanupPrefix = "[agentrouter-auto-filter] history-cleanup ";
+  const cleanupLogs = events.filter(event => event.event === "log" && event.message.startsWith(cleanupPrefix));
+  assert.equal(cleanupLogs.length, 1, "Magpie must retain cleanup details even though its log shim drops extra");
+  const cleanup = JSON.parse(cleanupLogs[0].message.slice(cleanupPrefix.length));
+  assert.equal(cleanup.errorCode, "different_azure");
+  assert.equal(cleanup.removed, 1);
   assert.doesNotMatch(JSON.stringify(events.filter(event => event.event === "log")), /test-password|private-history|model-123|session=s123/);
 });

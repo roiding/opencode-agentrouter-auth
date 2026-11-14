@@ -174,12 +174,17 @@ through without speculative repair or replay.
 
 1. Preserve the original body for the first request and every non-cleaning retry.
 2. Only a protocol-specific, explicit history error can authorize a repair.
+   Responses resource mismatch, encrypted history and session-binding invalidation
+   may repair once; binding recovery also rotates the request's session identity.
+   The same exact signatures are recognized when an SDK wraps them in a thrown
+   stream-disconnection error.
    Authentication, quota, generic parameter and overload errors cannot do so.
 3. Responses retains its safe portable-history transformation and rejects
    references/compaction it cannot reconstruct. Other protocols never receive
    Responses field deletions. Required thinking/tool signatures are not discarded.
 4. One selected-provider invocation has the existing combined 20-retry limit and
-   resource/rate/transport/availability budgets of 5/20/10/10. Magpie failover is a
+   resource/rate/transport/availability budgets of 5/20/10/10; binding recovery
+   is capped at one retry. Magpie failover is a
    separate outer operation; caller cancellation bounds it, not a fake global
    counter shared between accounts.
 5. Honor server wait hints, idle and total deadlines, cancellation during every

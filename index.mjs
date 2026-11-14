@@ -11,7 +11,8 @@ async function plugin(input = {}, options = {}) {
     const result = input.client?.app?.log?.({ body: {
       service: "agentrouter-auto-filter",
       level: event.endsWith("error") || event === "cleanup-refused" ? "warn" : "info",
-      message: event,
+      // Magpie's host forwards message but drops extra; keep safe diagnostics visible.
+      message: `${event} ${JSON.stringify(data)}`,
       extra: data
     } });
     result?.catch?.(() => {});

@@ -103,12 +103,12 @@ GitHub 也可选择这种完整网页登录后的交接方式。LinuxDO 的未�
 保护四类对话 API 的流式与非流式请求：
 
 1. 首次保留请求体原始字节；普通重试也保留，不预先删历史、不替换 `model`。这里指 `fetch` 收到的上游协议请求；Magpie 可能已转换客户端协议。
-2. 仅 Responses 的明确资源不匹配或 `invalid_encrypted_content` 才执行已验证的历史清理。非流式 HTTP 200 中明确的错误对象也在交付前检查。
+2. 仅 Responses 的明确资源不匹配、会话绑定失效（`session binding invalidated` / code 30013）或 `invalid_encrypted_content` 才执行已验证的历史清理。资源不匹配同时识别原始 `Azure OpenAI resource` 和 AgentRouter 脱敏后的 `*** OpenAI resource`，仍要求完整的两句资源错误说明；兼容上游增加的 `OpenAI Responses bad request:` 前缀。会话绑定失效兼容 HTTP 400/409、JSON/纯文本/SSE 错误体；两者也会识别 SDK 包装成 `stream disconnected before completion: ...` 的异常消息。会话绑定清理后同时轮换请求中的会话标识并只重试一次。非流式 HTTP 200 中明确的错误对象也在交付前检查。
 3. 清理保留消息正文、图片、phase、工具参数/结果及 `call_id` 配对；需要无法恢复的服务端引用、压缩或 item reference 时明确失败，不静默丢上下文。
 4. Chat、Anthropic、Gemini 不套用 Responses 字段删除。thinking、signature、thoughtSignature 不会因为泛化错误而被删掉；未经验证的签名修复不猜着做。
 5. 限流、传输与已识别的可用性错误有限重试；502/504 等状态中的明确 `upstream_idle_timeout`、`stream_disconnected` 错误也进入传输重试，不再只识别 HTTP 200 内的同类错误。认证失败、余额不足和普通参数错误不触发清理。
 
-单次选定供应商调用最多额外重试 20 次，资源/限流/传输/可用性分别最多 5/20/10/10 次，遵守服务端等待提示、总期限、空闲期限和客户端取消。Magpie 跨账号故障切换是独立外层，不应把这里的 20 次宣传为整条调用链的总数。
+单次选定供应商调用最多额外重试 20 次，资源/限流/传输/可用性分别最多 5/20/10/10 次；会话绑定失效单独最多恢复一次，不会在同一个失败绑定上循环。遵守服务端等待提示、总期限、空闲期限和客户端取消。Magpie 跨账号故障切换是独立外层，不应把这里的 20 次宣传为整条调用链的总数。
 
 SSE 在确认有效终止前不交付内容或客户端工具调用。Responses 识别 completed/incomplete；Chat 检查 choices 和 DONE；Anthropic 检查 message_stop；Gemini 检查候选项结束或合法阻断，并等待正常流结束、保留用量尾帧。失败尝试整体丢弃，同一网络块中终止标记之后的多余内容不泄露。合法拒绝、长度终止不当成断流重放。
 
@@ -138,7 +138,7 @@ SSE 在确认有效终止前不交付内容或客户端工具调用。Responses 
 }
 ```
 
-日志只记录结构化事件、类别、计数和耗时，不记录请求正文、密码、Cookie、令牌、授权码或 state。
+日志只记录结构化事件、类别、计数和耗时，不记录请求正文、密码、Cookie、令牌、授权码或 state。Magpie 当前宿主会丢弃日志的 `extra` 字段，因此这些安全诊断也写进 `message`，可以直接看到 `kind`、`errorCode`、清理计数和重试次数，而不只是事件名。
 
 ## 开发
 
