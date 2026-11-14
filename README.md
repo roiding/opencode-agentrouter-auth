@@ -1,5 +1,7 @@
 # AgentRouter
 
+> ⚠️ **重要说明**：npm 上的 [`opencode-agentrouter-auth`](https://www.npmjs.com/package/opencode-agentrouter-auth) **不是本仓库的正规发布**，也不是本插件；请勿用它安装本插件。本仓库的 npm 包名是 `opencode-agentrouter-auth1`。
+
 Magpie 的 AgentRouter 供应商插件：五种独立登录方式、原生多账号与智能路由、可选每日签到，以及跨协议的请求保护。请求保护由供应商的 `auth.loader.fetch` 执行，不启动独立代理，不改 Codex 配置或本地会话，不给其他供应商套全局拦截器。
 
 运行时使用 JavaScript、标准 Web API 和 Node 兼容的只读文件 API（自带图标及模型注册表），跑在 Magpie 的 Bun 插件宿主上，不依赖外部 shell 命令，不分 Windows、macOS、Linux。设计与验收标准见 [DESIGN.md](DESIGN.md)，来源与许可见 [UPSTREAM.md](UPSTREAM.md)。
@@ -7,7 +9,7 @@ Magpie 的 AgentRouter 供应商插件：五种独立登录方式、原生多账
 ## 安装
 
 ```sh
-magpie plugin add opencode-agentrouter-auth          # npm
+magpie plugin add opencode-agentrouter-auth1        # npm
 magpie plugin add github:roiding/opencode-agentrouter-auth   # git
 magpie plugin add /path/to/opencode-agentrouter-auth # 本地文件夹
 magpie plugin login agentrouter

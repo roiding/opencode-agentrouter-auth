@@ -46,5 +46,5 @@ async function plugin(input = {}, options = {}) {
   return hooks;
 }
 
-export default { id: "opencode-agentrouter-auth", server: plugin };
+export default { id: "opencode-agentrouter-auth1", server: plugin };
 export const _internal = { ...filter };

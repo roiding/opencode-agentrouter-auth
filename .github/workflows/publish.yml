@@ -45,6 +45,11 @@ jobs:
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
+          package="$(node -p "require('./package.json').name")"
+          if npm view "$package@$version" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "$package@$version is already published"
+            exit 0
+          fi
           if [[ "$version" == *-* ]]; then
             npm publish --tag dev --access public
           else

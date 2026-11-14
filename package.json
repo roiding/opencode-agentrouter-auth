@@ -1,6 +1,6 @@
 {
-  "name": "opencode-agentrouter-auth",
-  "version": "0.2.0-dev.1",
+  "name": "opencode-agentrouter-auth1",
+  "version": "0.2.0-dev.2",
   "description": "AgentRouter account login, optional daily sign-in and native multi-account routing for Magpie, with conservative multi-protocol request protection.",
   "type": "module",
   "main": "./index.mjs",
@@ -44,7 +44,6 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": true,
     "registry": "https://registry.npmjs.org"
   }
 }
