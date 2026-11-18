@@ -243,6 +243,68 @@ test("cleanup preserves phase, images, custom calls and nested resource IDs", ()
   assert.equal(body.input[0].id, "reasoning-old");
 });
 
+test("missing reasoning item errors clean only the named reasoning item and retry", async t => {
+  const missing = "rs_18e900b7e8fd87f00000007b";
+  const error = { type: "invalid_request_error", message: `Item with id '${missing}' not found. [trace_id=trace-1]` };
+  const body = { ...history, input: [
+    { type: "reasoning", id: missing, encrypted_content: "expired-private-history" },
+    ...history.input.slice(1)
+  ] };
+  for (const [name, first] of [
+    ["HTTP 400", () => json({ error }, 400)],
+    ["HTTP 200 error JSON", () => json({ error })],
+    ["HTTP 200 failed response", () => json({ status: "failed", error })],
+    ["SSE response.failed", () => sse(frame("response.failed", { response: { error } }))],
+    ["SDK stream error", () => { throw new Error(`stream disconnected before completion: AgentRouter: ${error.message}`); }]
+  ]) await t.test(name, async () => {
+    const h = harness([first, () => sse(completed)]);
+    const response = await h.send(body);
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /new-good-history/);
+    assert.equal(h.calls.length, 2);
+    assert.deepEqual(h.calls[0].body, body);
+    assert.equal(h.calls[1].body.store, false);
+    assert.equal(h.calls[1].body.input.length, body.input.length - 1);
+    assert.equal(h.calls[1].body.input.some(item => item.id === missing), false);
+    assert.equal(h.calls[1].body.input.some(item => item.content === "private-user-text"), true);
+    assert.equal(h.calls[1].body.input.some(item => item.call_id === "pair"), true);
+    const cleanup = h.logs.filter(row => row.event === "history-cleanup");
+    assert.equal(cleanup.length, 1);
+    assert.equal(cleanup[0].errorCode, "item_not_found");
+    assert.equal(cleanup[0].removed, 1);
+    assert.equal(h.logs.find(row => row.event === "retry-scheduled").kind, "resource");
+    assert.doesNotMatch(JSON.stringify(h.logs), /expired-private-history|private-user-text|trace-1/);
+  });
+});
+
+test("missing reasoning item cleanup is conservative and protocol-scoped", async () => {
+  const { historyErrorCode, retryErrorClass } = _internal;
+  const message = "Item with id 'rs_missing' not found. [trace_id=trace-1]";
+  const error = { type: "invalid_request_error", message };
+  assert.equal(historyErrorCode({ error }), "item_not_found");
+  assert.equal(retryErrorClass({ error }), "resource");
+  assert.equal(historyErrorCode({ error }, "chat"), null);
+  for (const bad of [
+    { ...error, type: "authentication_error" },
+    { ...error, message: "Account quota exhausted. " + message },
+    { ...error, message: "Item with id rs_missing not found." },
+    { ...error, message: "Item with id 'rs_missing' was not found." },
+    { ...error, message: "Item with id 'rs_missing' not found. Account quota exhausted." }
+  ]) {
+    assert.equal(historyErrorCode({ error: bad }), null, JSON.stringify(bad));
+    assert.equal(retryErrorClass({ error: bad }), null, JSON.stringify(bad));
+  }
+
+  const h = harness([() => json({ error }, 400)]);
+  const body = { ...history, input: [{ type: "message", id: "visible", role: "user", content: "hello" }] };
+  const response = await h.send(body);
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, "missing_item_not_in_history");
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.calls[0].body, body);
+  assert.equal(h.logs.some(row => row.event === "cleanup-refused"), true);
+});
+
 test("basic request validation and request-size limits happen before upstream I/O", async t => {
   for (const [body, code, options] of [
     ["not json", "invalid_request_json", {}], ["null", "invalid_request_json", {}],
